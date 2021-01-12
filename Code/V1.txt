@@ -1,0 +1,426 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <cblas.h>
+#include <math.h>
+#include <time.h>
+#include <stdbool.h>
+#include <mpi.h>
+#include <unistd.h>
+
+
+//-------- Definition of the kNN result struct ----------------------
+
+typedef struct knnresult{
+  int    * nidx;    // Indices (0-based) of nearest neighbors [m-by-k]
+  double * ndist;   // Distance of nearest neighbors          [m-by-k]
+  int      m;       // Number of query points                 [scalar]
+  int      k;       // Number of nearest neighbors            [scalar]
+} knnresult;
+
+
+
+//----------- Sorting method to find the k smallest elements of the matrix ------------------
+
+static int partitions(double *arr, int low, int high, int *ind)
+    {
+        int pivot = arr[high], pivotloc = low, temp2;
+        double temp;
+        for (int i = low; i <= high; i++)
+        {
+            // inserting elements of less value
+            // to the left of the pivot location
+            if(arr[i] < pivot)
+            {
+                temp = arr[i];
+                arr[i] = arr[pivotloc];
+                arr[pivotloc] = temp;
+
+                pivotloc++;
+
+                temp2 = ind[i];
+                ind[i] = ind[pivotloc];
+                ind[pivotloc]= temp2;
+            }
+        }
+
+        // swapping pivot to the readonly pivot location
+        temp = arr[high];
+        arr[high] = arr[pivotloc];
+        arr[pivotloc] = temp;
+
+        temp2 = ind[high];
+        ind[high] = ind[pivotloc];
+        ind[pivotloc]= temp2;
+
+        return pivotloc;
+    }
+
+    // finds the kth position (of the sorted array)
+    // in a given unsorted array i.e this function
+
+    static int kthSmallest(double *arr, int low,  int high, int k, int *ind)
+    {
+
+        // find the partition
+        int partition = partitions(arr,low,high,ind);
+
+        // if partition value is equal to the kth position,
+        // return value at k.
+        if(partition == k)
+            return arr[partition];
+
+        // if partition value is less than kth position,
+        // search right side of the array.
+        else if(partition < k )
+            return kthSmallest(arr, partition + 1, high, k, ind );
+
+        // if partition value is more than kth position,
+        // search left side of the array.
+        else
+            return kthSmallest(arr, low, partition - 1, k, ind );
+    }
+
+
+
+
+
+//-------------------------------------------------------------------------------------------
+
+
+
+//------- Sorting method which will be used at kNN function ---------
+
+int partition (double *arr, int low, int high, int *k_n)
+{
+    double pivot = arr[high];    // pivot
+    int i = (low - 1);  // Index of smaller element
+    double temp;
+    int temp2;
+
+
+    for (int j = low; j <= high- 1; j++)
+    {
+        // If current element is smaller than the pivot
+        if (arr[j] < pivot)
+        {
+            i++;    // increment index of smaller element
+
+            //keeping the indices of the nearest neighbours
+
+
+            temp = arr[i];
+            arr[i] = arr[j];
+            arr[j] = temp;
+
+            temp2=k_n[i];
+            k_n[i]=k_n[j];
+            k_n[j]=temp2;
+
+        }
+    }
+
+    temp=arr[i+1];
+    arr[i+1]=arr[high];
+    arr[high]=temp;
+
+    temp2=k_n[i+1];
+    k_n[i+1]=k_n[high];
+    k_n[high]=temp2;
+
+
+    return (i + 1);
+}
+
+
+
+void quickSort(double *arr, int low, int high, int *k_n)
+{
+    if (low < high)
+    {
+        /* pi is partitioning index, arr[p] is now
+           at right place */
+        int pi = partition(arr, low, high, k_n);
+
+        // Separately sort elements before
+        // partition and after partition
+        quickSort(arr, low, pi - 1, k_n);
+        quickSort(arr, pi + 1, high, k_n);
+    }
+}
+
+// -----------------------------------------------------------------
+
+
+
+knnresult distrALLkNN(double * X, double * Y, int n, int m, int d, int k){
+
+    double *D = (double *) malloc (n*m*sizeof(double));
+
+    knnresult knn;
+
+
+
+    //initializing the matrix D
+    for(int i=0; i<n*m; i++)
+        D[i]=0;
+
+    double xsum[n],ysum[m];
+
+    for(int i=0; i<n; i++)
+        xsum[i]=0;
+
+    for(int i=0; i<m; i++)
+        ysum[i]=0;
+
+    //calculating xsum & ysum
+    for(int i=0; i<n; i++){
+        xsum[i]=cblas_ddot(d,X + i*d,1,X + i*d,1);
+    }
+
+    for(int i=0; i<m; i++){
+        ysum[i]=cblas_ddot(d,Y + i*d,1,Y + i*d,1);
+    }
+
+
+
+    //calculating -2*X*Y
+    cblas_dgemm(CblasRowMajor , CblasNoTrans, CblasTrans, n, m, d, -2, X, d, Y, d, 0, D, m);
+
+    double temp;
+
+
+    //Adding distance to matrix D
+    for(int i=0; i<n; i++){
+        for(int j=0; j<m; j++){
+            D[j + m*i] += xsum[i] + ysum[j];
+            temp =D[j + m*i];
+            D[j + m*i] = sqrt(temp);
+            //printf("D[%d][%d]= %f \n",i,j,D[j+m*i]);
+        }
+    }
+
+
+
+    int *indices = (int *) malloc (n*sizeof(int)); //array to hold the indices of each column of D[][]
+    double *block = (double *) malloc (n*sizeof(double)); //array to hold the values of each column of D[][]
+
+    knn.nidx = (int *) malloc (m*k*sizeof(int));
+    knn.ndist = (double *) malloc (m*k*sizeof(double));
+
+    int low = 0;
+    int high = n-1;
+    int kth_smallest;
+
+
+    //Calling selection and quick sort to sort the k first elements of matrix D
+
+
+    for(int i=0; i<m; i++){
+
+        for(int j=0; j<n; j++){
+
+            block[j]=D[i + m*j];
+            indices[j]= i + m*j;
+        }
+
+        kth_smallest=kthSmallest(block, low,  high, k-1, indices);
+
+        quickSort(block, low, kth_smallest-1, indices);
+
+
+        //adding k nearest dist and indices to the struct
+        for(int y=0; y<k; y++){
+            knn.ndist[y + k*i] = block[y];
+            knn.nidx[y + k*i] = indices[y];
+        }
+
+    }
+
+    knn.k=k;
+    knn.m=m;
+
+    free(D);
+    free(indices);
+    free(block);
+
+    return knn;
+
+} //---------------end of kNN function---------------------
+
+
+
+
+
+
+
+
+
+//------MAIN FUNCTION-------
+
+int main(int argc, char **argv)
+{
+    knnresult k_stable;
+
+     clock_t start, end;
+     double cpu_time_used;
+
+    MPI_Status status;
+
+    //Array parameters
+    int n=20000, d=5, k=20;
+
+    //parameters to assign random float values
+    float M=10.0, N=0, var=0;
+
+    int rank, size;     // for storing this process' rank, and the number of processes
+
+    double *X = (double *) malloc (n*d*sizeof(double));
+
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+
+    //setting some random float values to the matrix
+
+
+    srand(time(NULL));
+
+    if(rank == 0){
+
+        for (int i = 0; i <  n; i++)
+            for (int j = 0; j < d; j++){
+                var = M + (rand() / ( RAND_MAX / (N-M) ) ) ;
+                *(X + i*d + j) = trunc(100 * var) / 100;
+            }
+    }
+
+    int rem = (n*d)%size;       // elements remaining after division among processes
+    int sum = 0;                // Sum of counts. Used to calculate displacements
+
+
+
+    int *sendcounts; // array describing how many elements to send to each process
+    int *displs;     // array describing the displacements where each segment begins
+
+    sendcounts = malloc(sizeof(int)*size);
+    displs = malloc(sizeof(int)*size);
+
+
+    // calculate send counts and displacements
+    for (int i = 0; i < size; i++) {
+        sendcounts[i] = (n*d)/size;
+        if (rem > 0) {
+            sendcounts[i]+=d;
+            rem-=d;
+        }
+
+        displs[i] = sum;
+        sum += sendcounts[i];
+    }
+
+    // buffers where the received data should be stored
+    double *rec_buf = (double *) malloc (sendcounts[rank]*sizeof(double)); //Buffer containing the chunk of X array each process will take
+    double *rec_buf2 = (double *) malloc (n*d*sizeof(double)); //Buffer containing the data which will be sent along a ring
+
+
+
+    /*
+     // print calculated send counts and displacements for each process
+    if (0 == rank) {
+        for (int i = 0; i < size; i++) {
+            printf("sendcounts[%d] = %d\tdispls[%d] = %d\n", i, sendcounts[i], i, displs[i]);
+        }
+    }
+    */
+
+    // divide the data among processes as described by sendcounts and displs
+    MPI_Scatterv(X, sendcounts, displs, MPI_DOUBLE, rec_buf, sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+
+    /*
+    // print what each process received
+    printf("%d: ", rank);
+    for (int i = 0; i < sendcounts[rank]; i++) {
+        printf("%f\t", rec_buf[i]);
+    }
+    printf("\n");
+    */
+
+    int rec_buf_n = sendcounts[rank] /d;
+
+
+
+
+    //Sending data along a ring
+
+    for(int i=0; i<size-1; i++){
+        if (rank == 0) {
+	    MPI_Send( X, n*d, MPI_DOUBLE, rank + 1, rank, MPI_COMM_WORLD );
+        }
+	else {
+	    MPI_Recv( rec_buf2, n*d, MPI_DOUBLE, rank - 1, rank-1, MPI_COMM_WORLD,  &status );
+	    if (rank < size - 1)
+		MPI_Send( rec_buf2, n*d, MPI_DOUBLE, rank + 1, rank, MPI_COMM_WORLD );
+	}
+
+    }
+
+
+    start = clock();
+
+    //Calculating the k-nearest
+
+    if(rank == 0){
+        k_stable=distrALLkNN(X,rec_buf,n,rec_buf_n,d,k);
+    }
+    else{
+        k_stable=distrALLkNN(rec_buf2,rec_buf,n,rec_buf_n,d,k);
+    }
+
+    end = clock();
+    cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+
+
+ //printing the result of distrALLkNN function
+
+    /*
+    printf("%d: ", rank);
+
+    for(int i=0; i<rec_buf_n; i++){
+        for(int j=0; j<k; j++){
+            printf("nidx[%d][%d] = %d    ",i,j,k_stable.nidx[j+k*i]);
+        }
+        printf("\n");
+    }
+
+    for(int i=0; i<rec_buf_n; i++){
+        for(int j=0; j<k; j++){
+            printf("ndist[%d][%d] = %f    ",i,j,k_stable.ndist[j+k*i]);
+        }
+        printf("\n");
+    }
+
+    printf("m = %d \n",k_stable.m);
+    printf("k = %d \n",k_stable.k);
+    */
+
+
+
+    printf("distrALLkNN took process_%d  %f seconds to execute \n", rank, cpu_time_used);
+
+
+    MPI_Finalize();
+
+    free(sendcounts);
+    free(displs);
+    free(X);
+    free(rec_buf);
+    free(rec_buf2);
+
+
+
+
+    return 0;
+}

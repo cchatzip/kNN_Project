@@ -1,0 +1,318 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <cblas.h>
+#include <math.h>
+#include <time.h>
+#include <stdbool.h>
+
+
+
+//-------- Definition of the kNN result struct ----------------------
+
+typedef struct knnresult{
+  int    * nidx;    // Indices (0-based) of nearest neighbors [m-by-k]
+  double * ndist;   // Distance of nearest neighbors          [m-by-k]
+  int      m;       // Number of query points                 [scalar]
+  int      k;       // Number of nearest neighbors            [scalar]
+} knnresult;
+
+
+//----------- Sorting method to find the k smallest elements of the matrix ------------------
+
+static int partitions(double *arr, int low, int high, int *ind)
+    {
+        int pivot = arr[high], pivotloc = low, temp2;
+        double temp;
+        for (int i = low; i <= high; i++)
+        {
+            // inserting elements of less value
+            // to the left of the pivot location
+            if(arr[i] < pivot)
+            {
+                temp = arr[i];
+                arr[i] = arr[pivotloc];
+                arr[pivotloc] = temp;
+
+                pivotloc++;
+
+                temp2 = ind[i];
+                ind[i] = ind[pivotloc];
+                ind[pivotloc]= temp2;
+
+                //printf("swapped %d with %d \n",ind[i],ind[pivotloc]);
+            }
+        }
+
+        // swapping pivot to the readonly pivot location
+        temp = arr[high];
+        arr[high] = arr[pivotloc];
+        arr[pivotloc] = temp;
+
+        temp2 = ind[high];
+        ind[high] = ind[pivotloc];
+        ind[pivotloc]= temp2;
+
+         //printf("swapped %d with %d \n",ind[high],ind[pivotloc]);
+
+        return pivotloc;
+    }
+
+    // finds the kth position (of the sorted array)
+    // in a given unsorted array i.e this function
+
+    static int kthSmallest(double *arr, int low,  int high, int k, int *ind)
+    {
+
+        // find the partition
+        int partition = partitions(arr,low,high,ind);
+
+        // if partition value is equal to the kth position,
+        // return value at k.
+        if(partition == k)
+            return arr[partition];
+
+        // if partition value is less than kth position,
+        // search right side of the array.
+        else if(partition < k )
+            return kthSmallest(arr, partition + 1, high, k, ind );
+
+        // if partition value is more than kth position,
+        // search left side of the array.
+        else
+            return kthSmallest(arr, low, partition - 1, k, ind );
+    }
+
+
+
+
+
+//-------------------------------------------------------------------------------------------
+
+
+
+
+//------- Sorting method which will be used at kNN function ---------
+
+int partition (double *arr, int low, int high, int *k_n)
+{
+    double pivot = arr[high];    // pivot
+    int i = (low - 1);  // Index of smaller element
+    double temp;
+    int temp2;
+
+
+    for (int j = low; j <= high- 1; j++)
+    {
+        // If current element is smaller than the pivot
+        if (arr[j] < pivot)
+        {
+            i++;    // increment index of smaller element
+
+            //keeping the indices of the nearest neighbours
+
+
+            temp = arr[i];
+            arr[i] = arr[j];
+            arr[j] = temp;
+
+            temp2=k_n[i];
+            k_n[i]=k_n[j];
+            k_n[j]=temp2;
+
+        }
+    }
+
+    temp=arr[i+1];
+    arr[i+1]=arr[high];
+    arr[high]=temp;
+
+    temp2=k_n[i+1];
+    k_n[i+1]=k_n[high];
+    k_n[high]=temp2;
+
+
+    return (i + 1);
+}
+
+
+
+void quickSort(double *arr, int low, int high, int *k_n)
+{
+    if (low < high)
+    {
+        /* pi is partitioning index, arr[p] is now
+           at right place */
+        int pi = partition(arr, low, high, k_n);
+
+        // Separately sort elements before
+        // partition and after partition
+        quickSort(arr, low, pi - 1, k_n);
+        quickSort(arr, pi + 1, high, k_n);
+    }
+}
+
+// -----------------------------------------------------------------
+
+
+
+knnresult kNN(double * X, double * Y, int n, int m, int d, int k){
+
+    double *D = (double *) malloc (n*m*sizeof(double));
+
+    knnresult knn;
+
+
+    //initializing the matrix D
+    for(int i=0; i<n*m; i++)
+        D[i]=0;
+
+    double xsum[n],ysum[m];
+
+    for(int i=0; i<n; i++)
+        xsum[i]=0;
+
+    for(int i=0; i<m; i++)
+        ysum[i]=0;
+
+    //calculating xsum & ysum
+    for(int i=0; i<n; i++){
+        xsum[i]=cblas_ddot(d,X + i*d,1,X + i*d,1);
+    }
+
+    for(int i=0; i<m; i++){
+        ysum[i]=cblas_ddot(d,Y + i*d,1,Y + i*d,1);
+    }
+
+
+    printf("\n");
+
+    //calculating -2*X*Y
+    cblas_dgemm(CblasRowMajor , CblasNoTrans, CblasTrans, n, m, d, -2, X, d, Y, d, 0, D, m);
+
+    double temp;
+
+    //Adding distance to matrix D
+    for(int i=0; i<n; i++){
+        for(int j=0; j<m; j++){
+            D[j + m*i] += xsum[i] + ysum[j];
+            temp =D[j + m*i];
+            D[j + m*i] = sqrt(temp);
+            //printf("D[%d][%d]=%f \n",i,j,D[j+m*i]);
+        }
+    }
+
+
+    printf("\n");
+
+
+    int *indices = (int *) malloc (n*sizeof(int)); //array to hold the indices of each column of D[][]
+    double *block = (double *) malloc (n*sizeof(double)); //array to hold the values of each column of D[][]
+
+    knn.nidx = (int *) malloc (m*k*sizeof(int));
+    knn.ndist = (double *) malloc (m*k*sizeof(double));
+
+    int low = 0;
+    int high = n-1;
+    int kth_smallest;
+
+
+    //Calling quicksort to sort each column of matrix D
+
+
+    for(int i=0; i<m; i++){
+
+        for(int j=0; j<n; j++){
+
+            block[j]=D[i + m*j];
+            indices[j]= i + m*j;
+        }
+
+        kth_smallest=kthSmallest(block, low,  high, k-1, indices);
+        quickSort(block, low, kth_smallest-1, indices);
+
+
+
+        //adding k nearest dist and indices to the struct
+        for(int y=0; y<k; y++){
+            knn.ndist[y + k*i] = block[y];
+            knn.nidx[y + k*i] = indices[y];
+        }
+
+    }
+
+    knn.k=k;
+    knn.m=m;
+
+    return knn;
+
+} //end of kNN function
+
+
+
+
+//------MAIN FUNCTION-------
+
+int main(int argc, char **argv)
+{
+    knnresult k_nearest;
+
+    int n=30000, m=30000, d=5, k=10;
+    float M=10.0, N=0, var=0;
+
+
+    double *X = (double *) malloc (n*d*sizeof(double));
+    double *Y = (double *) malloc (m*d*sizeof(double));
+
+    srand(time(NULL));
+
+    //setting some random float values to the matrices
+
+    for (int i = 0; i <  n; i++)
+      for (int j = 0; j < d; j++){
+         var = M + (rand() / ( RAND_MAX / (N-M) ) ) ;
+         *(X + i*d + j) = trunc(100 * var) / 100;
+      }
+
+    for (int i = 0; i <  m; i++)
+      for (int j = 0; j < d; j++){
+         var = M + (rand() / ( RAND_MAX / (N-M) ) ) ;
+         *(Y + i*d + j) = trunc(100 * var) / 100;
+      }
+
+
+    clock_t start, end;
+    double cpu_time_used;
+
+
+    start = clock();
+    //Calling function to calculate kNN
+    k_nearest=kNN(X,Y,n,m,d,k);
+
+    end = clock();
+    cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+
+    //printing the result of kNN function
+
+    /*
+    for(int i=0; i<m; i++){
+        for(int j=0; j<k; j++){
+            printf("nidx[%d][%d] = %d    ",i,j,k_nearest.nidx[j+k*i]);
+        }
+        printf("\n");
+    }
+
+    for(int i=0; i<m; i++){
+        for(int j=0; j<k; j++){
+            printf("ndist[%d][%d] = %f    ",i,j,k_nearest.ndist[j+k*i]);
+        }
+        printf("\n");
+    }
+
+    printf("m = %d \n",k_nearest.m);
+    printf("k = %d \n",k_nearest.k);
+    */
+
+    printf("Execution took %f seconds. \n",cpu_time_used);
+
+    return 0;
+}
